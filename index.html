@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- ===== ここを編集（オプチャのカードに出る文字） ===== -->
+  <title>お知らせ｜まどかプロジェクト</title>
+  <meta name="description" content="最新のお知らせはこちらをタップ">
+
+  <!-- ===== OGP（LINEのカード表示用。使われるのは title / description / image の3つ） ===== -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="お知らせ｜まどかプロジェクト">
+  <meta property="og:description" content="最新のお知らせはこちらをタップ">
+  <meta property="og:image" content="https://kuroineko2010.github.io/liff-fiex/card.png">
+
+  <style>
+    :root{ --v:#3a1c71; --p:#e95fa8; --ink:#241a33; }
+    *{ box-sizing:border-box; }
+    body{
+      margin:0; min-height:100dvh; display:flex; align-items:center; justify-content:center;
+      font-family:-apple-system,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+      background:linear-gradient(160deg,var(--v),var(--p)); color:var(--ink); padding:24px;
+    }
+    .card{
+      width:100%; max-width:440px; background:#fff; border-radius:20px; padding:32px 26px;
+      box-shadow:0 12px 40px rgba(0,0,0,.25); text-align:center;
+    }
+    h1{ font-size:21px; margin:0 0 10px; }
+    p{ font-size:14px; color:#555; line-height:1.7; margin:0 0 24px; }
+    a.btn{
+      display:block; text-decoration:none; background:linear-gradient(135deg,var(--v),var(--p));
+      color:#fff; font-weight:700; font-size:16px; padding:15px; border-radius:12px;
+    }
+    a.btn:active{ opacity:.8; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <!-- ===== ページを開いた人に見せる中身（任意で編集） ===== -->
+    <h1>お知らせ</h1>
+    <p>下のボタンから移動できます。</p>
+
+    <!-- ===== リンク先をここで差し替え（今はテスト用にGoogle） ===== -->
+    <a class="btn" href="https://www.google.com" target="_blank" rel="noopener">
+      ページを開く
+    </a>
+  </div>
+
+  <!-- タップ後すぐ別URLへ自動転送したい場合は、下の行の先頭と末尾のコメントを外して使う
+  <script> location.href = "https://www.google.com"; </script>
+  -->
+</body>
+</html>
