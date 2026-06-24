@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>NEETルームシミュレーター</title>
+<style>
+html,body{margin:0;padding:0;overflow:hidden;background:#0a0a14;width:100%;height:100%;font-family:'Yu Gothic','Hiragino Kaku Gothic ProN',sans-serif;}
+canvas{position:absolute;top:0;left:0;display:block;}
+#panel{position:absolute;top:0;right:0;width:280px;height:100%;background:rgba(8,8,20,0.94);color:#dde;overflow-y:auto;z-index:10;border-left:1px solid #223;}
+#ph{padding:10px 12px;background:linear-gradient(135deg,#12123a,#1e1050);font-size:13px;font-weight:bold;border-bottom:1px solid #334;text-align:center;letter-spacing:1px;}
+.tabs{display:flex;border-bottom:1px solid #223;}
+.tab{flex:1;padding:7px 2px;background:#0d0d20;border:none;color:#667;cursor:pointer;font-size:10px;border-bottom:2px solid transparent;transition:.2s;}
+.tab.active{color:#adf;border-bottom-color:#55f;background:#111828;}
+.tab-content{display:none;padding:8px;}
+.tab-content.active{display:block;}
+.sec{margin-bottom:10px;}
+.sec-title{font-size:10px;color:#779;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;padding-bottom:3px;border-bottom:1px solid #223;}
+.cr{display:flex;align-items:center;margin-bottom:5px;gap:6px;}
+.cr label{flex:1;font-size:11px;color:#cce;}
+.cr input[type=range]{width:90px;accent-color:#55f;}
+.cr input[type=color]{width:32px;height:20px;border:none;background:none;cursor:pointer;padding:0;}
+.cr span{font-size:10px;color:#889;min-width:28px;text-align:right;}
+.ti{display:flex;align-items:center;padding:3px 5px;border-radius:4px;margin-bottom:2px;gap:6px;}
+.ti:hover{background:#141430;}
+.ti span{flex:1;font-size:11px;color:#cce;}
+.ti input[type=checkbox]{accent-color:#55f;cursor:pointer;}
+::-webkit-scrollbar{width:4px;}
+::-webkit-scrollbar-track{background:#080812;}
+::-webkit-scrollbar-thumb{background:#335;border-radius:2px;}
+#help{position:absolute;bottom:8px;left:8px;background:rgba(0,0,0,.7);padding:6px 10px;border-radius:6px;font-size:10px;color:#778;line-height:1.9;pointer-events:none;}
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<div id="panel">
+  <div id="ph">🏠 NEETルームシミュレーター</div>
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('room')">🏠部屋</button>
+    <button class="tab" onclick="showTab('furn')">🪑家具</button>
+    <button class="tab" onclick="showTab('char')">👧キャラ</button>
+    <button class="tab" onclick="showTab('light')">💡照明</button>
+  </div>
+  <div id="tab-room" class="tab-content active"></div>
+  <div id="tab-furn" class="tab-content"></div>
+  <div id="tab-char" class="tab-content"></div>
+  <div id="tab-light" class="tab-content"></div>
+</div>
+<div id="help">
+  ドラッグ: 視点回転 &nbsp;|&nbsp; 右ドラッグ/中ドラッグ: パン<br>
+  スクロール: ズーム &nbsp;|&nbsp; WASD: カメラ移動<br>
+  矢印キー: キャラ移動 &nbsp;|&nbsp; QE: キャラ回転
+</div>
+<script>
+'use strict';
+const canvas = document.getElementById('canvas');
+const gl = canvas.getContext('webgl2',{antialias:true});
+if(!gl){alert('WebGL2が使用できません');throw 0;}
+
+function resize(){
+  canvas.width=window.innerWidth-280;
+  canvas.height=window.innerHeight;
+  gl.viewport(0,0,canvas.width,canvas.height);
+}
+window.addEventListener('resize',resize);
+resize();
+
+// ===== SHADERS =====
+const VS=`#version 300 es
+layout(location=0) in vec3 aP;
+layout(location=1) in vec3 aN;
+uniform mat4 uM,uV,uPr;
+uniform mat3 uN;
+out vec3 vP,vN;
+void main(){
+  vec4 w=uM*vec4(aP,1.);
+  vP=w.xyz; vN=uN*aN;
+  gl_Position=uPr*uV*w;
+}`;
+
+const FS=`#version 300 es
+precision mediump float;
+in vec3 vP,vN;
+uniform vec3 uCol,uCam,uL1P,uL1C,uL2P,uL2C,uAmb;
+uniform float uShin,uEmi;
+out vec4 fc;
+vec3 phong(vec3 lp,vec3 lc,vec3 n,vec3 p,vec3 eye,vec3 c){
+  vec3 l=normalize(lp-p),v=normalize(eye-p),h=normalize(l+v);
+  float d=max(dot(n,l),0.),s=pow(max(dot(n,h),0.),uShin);
+  return lc*(d*c+s*.25);
+}
+void main(){
+  vec3 n=normalize(vN),c=uCol;
+  vec3 r=uAmb*c;
+  r+=phong(uL1P,uL1C,n,vP,uCam,c);
+  r+=phong(uL2P,uL2C,n,vP,uCam,c);
+  r+=c*uEmi;
+  fc=vec4(r,1.);
+}`;
+
+function mkSh(src,type){
+  const s=gl.createShader(type);
+  gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog=gl.createProgram();
+gl.attachShader(prog,mkSh(VS,gl.VERTEX_SHADER));
+gl.attachShader(prog,mkSh(FS,gl.FRAGMENT_SHADER));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const U={};
+['uM','uV','uPr','uN','uCol','uCam','uL1P','uL1C','uL2P','uL2C','uAmb','uShin','uEmi'].forEach(n=>U[n]=gl.getUniformLocation(prog,n));
+
+// ===== MATH =====
+const m4={
+  id:()=>new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]),
+  mul(a,b){const o=new Float32Array(16);for(let i=0;i<4;i++)for(let j=0;j<4;j++){let s=0;for(let k=0;k<4;k++)s+=a[i+k*4]*b[k+j*4];o[i+j*4]=s;}return o;},
+  T(v){const m=m4.id();m[12]=v[0];m[13]=v[1];m[14]=v[2];return m;},
+  S(v){const m=m4.id();m[0]=v[0];m[5]=v[1];m[10]=v[2];return m;},
+  Ry(a){const m=m4.id(),c=Math.cos(a),s=Math.sin(a);m[0]=c;m[2]=s;m[8]=-s;m[10]=c;return m;},
+  Rx(a){const m=m4.id(),c=Math.cos(a),s=Math.sin(a);m[5]=c;m[6]=-s;m[9]=s;m[10]=c;return m;},
+  pers(fov,asp,n,f){const m=new Float32Array(16),t=1/Math.tan(fov/2);m[0]=t/asp;m[5]=t;m[10]=(f+n)/(n-f);m[11]=-1;m[14]=2*f*n/(n-f);return m;},
+  lookAt(e,t,u){
+    const z=v3.norm(v3.sub(e,t)),x=v3.norm(v3.cross(u,z)),y=v3.cross(z,x);
+    const m=new Float32Array(16);
+    m[0]=x[0];m[4]=x[1];m[8]=x[2];m[1]=y[0];m[5]=y[1];m[9]=y[2];m[2]=z[0];m[6]=z[1];m[10]=z[2];
+    m[12]=-v3.dot(x,e);m[13]=-v3.dot(y,e);m[14]=-v3.dot(z,e);m[15]=1;return m;
+  },
+  nm(m){return new Float32Array([m[0],m[1],m[2],m[4],m[5],m[6],m[8],m[9],m[10]]);}
+};
+const v3={
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  add:(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],
+  scale:(a,s)=>[a[0]*s,a[1]*s,a[2]*s],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+  len:(a)=>Math.sqrt(a[0]**2+a[1]**2+a[2]**2),
+  norm(a){const l=v3.len(a);return l?[a[0]/l,a[1]/l,a[2]/l]:[0,1,0];}
+};
+
+// ===== BOX VAO =====
+function mkBoxVAO(){
+  const p=[],n=[],idx=[];
+  const faces=[
+    {n:[0,0,1],v:[[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]},
+    {n:[0,0,-1],v:[[1,-1,-1],[-1,-1,-1],[-1,1,-1],[1,1,-1]]},
+    {n:[-1,0,0],v:[[-1,-1,-1],[-1,-1,1],[-1,1,1],[-1,1,-1]]},
+    {n:[1,0,0],v:[[1,-1,1],[1,-1,-1],[1,1,-1],[1,1,1]]},
+    {n:[0,1,0],v:[[-1,1,1],[1,1,1],[1,1,-1],[-1,1,-1]]},
+    {n:[0,-1,0],v:[[-1,-1,-1],[1,-1,-1],[1,-1,1],[-1,-1,1]]},
+  ];
+  let vi=0;
+  for(const f of faces){
+    for(const v of f.v){p.push(v[0]*.5,v[1]*.5,v[2]*.5);n.push(...f.n);}
+    idx.push(vi,vi+1,vi+2,vi,vi+2,vi+3);vi+=4;
+  }
+  const vao=gl.createVertexArray();gl.bindVertexArray(vao);
+  const pb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,pb);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(p),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);gl.vertexAttribPointer(0,3,gl.FLOAT,false,0,0);
+  const nb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,nb);
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array(n),gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(1);gl.vertexAttribPointer(1,3,gl.FLOAT,false,0,0);
+  const ib=gl.createBuffer();gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(idx),gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  return{vao,cnt:idx.length};
+}
+const BOX=mkBoxVAO();
+
+function drawBox(pos,size,col,ry=0,emi=0,shin=32){
+  const M=m4.mul(m4.T(pos),m4.mul(m4.Ry(ry),m4.S(size)));
+  gl.uniformMatrix4fv(U.uM,false,M);
+  gl.uniformMatrix3fv(U.uN,false,m4.nm(M));
+  gl.uniform3fv(U.uCol,col);
+  gl.uniform1f(U.uEmi,emi);
+  gl.uniform1f(U.uShin,shin);
+  gl.bindVertexArray(BOX.vao);
+  gl.drawElements(gl.TRIANGLES,BOX.cnt,gl.UNSIGNED_SHORT,0);
+}
+
+// ===== CAMERA =====
+const cam={
+  theta:-0.4,phi:0.5,dist:9,
+  target:[0,1.2,0],
+  pan:[0,0,0],
+  get pos(){
+    const t=this.theta,p=this.phi,d=this.dist;
+    return[
+      this.target[0]+this.pan[0]+d*Math.sin(t)*Math.cos(p),
+      this.target[1]+this.pan[1]+d*Math.sin(p),
+      this.target[2]+this.pan[2]+d*Math.cos(t)*Math.cos(p)
+    ];
+  }
+};
+
+// ===== SCENE STATE =====
+const state={
+  wallColor:[0.88,0.86,0.82],
+  floorColor:[0.65,0.48,0.32],
+  ceilColor:[0.95,0.94,0.92],
+  ambR:0.35,ambG:0.32,ambB:0.38,
+  l1x:2,l1y:2.8,l1z:1,
+  l1r:1.0,l1g:0.95,l1b:0.85,l1i:0.9,
+  l2x:-3,l2y:2.5,l2z:-2,
+  l2r:0.5,l2g:0.6,l2b:1.0,l2i:0.4,
+  charX:1.0,charZ:-2.8,charRY:0,
+  charVisible:true,
+};
+
+// ===== OBJECTS =====
+// Each: {id, name, cat, vis, parts:[{p,s,c,ry?,emi?,shin?}]}
+// p=pos(relative to obj origin), s=size, c=color
+// Object-level pos is added to each part's p
+
+const OBJS=[
+// ---- ROOM ----
+{id:'floor',name:'フロア',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[0,-0.05,0],s:[10,0.1,10],c:'floor'},
+]},
+{id:'back_wall',name:'後ろの壁',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[0,1.5,-5],s:[10,3,0.1],c:'wall'},
+]},
+{id:'left_wall',name:'左の壁',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[-5,1.5,0],s:[0.1,3,10],c:'wall'},
+]},
+{id:'right_wall',name:'右の壁',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[5,1.5,0],s:[0.1,3,10],c:'wall'},
+]},
+{id:'ceiling',name:'天井',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[0,3.05,0],s:[10,0.1,10],c:'ceil'},
+]},
+{id:'baseboard',name:'巾木',cat:'room',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[0,0.05,-4.9],s:[9.8,0.1,0.06],c:[0.75,0.72,0.68]},
+  {p:[-4.9,0.05,0],s:[0.06,0.1,9.8],c:[0.75,0.72,0.68]},
+  {p:[4.9,0.05,0],s:[0.06,0.1,9.8],c:[0.75,0.72,0.68]},
+]},
+
+// ---- DESK ----
+{id:'desk',name:'デスク',cat:'furn',vis:true,ox:0.8,oy:0,oz:-4.3,ory:0,parts:[
+  {p:[0,0.76,0],s:[2.0,0.06,0.85],c:[0.25,0.17,0.11]},
+  {p:[-0.9,0.375,-0.35],s:[0.06,0.75,0.06],c:[0.22,0.15,0.09]},
+  {p:[0.9,0.375,-0.35],s:[0.06,0.75,0.06],c:[0.22,0.15,0.09]},
+  {p:[-0.9,0.375,0.35],s:[0.06,0.75,0.06],c:[0.22,0.15,0.09]},
+  {p:[0.9,0.375,0.35],s:[0.06,0.75,0.06],c:[0.22,0.15,0.09]},
+  {p:[0,0.06,0],s:[2.0,0.06,0.85],c:[0.22,0.15,0.09]},
+  // shelf under
+  {p:[0,0.4,0],s:[1.9,0.04,0.8],c:[0.25,0.17,0.11]},
+]},
+{id:'monitor',name:'モニター',cat:'furn',vis:true,ox:0.5,oy:0,oz:-4.3,ory:0,parts:[
+  {p:[0,0.82,0],s:[0.4,0.04,0.25],c:[0.12,0.1,0.1]},
+  {p:[0,0.84,-0.08],s:[0.08,0.45,0.08],c:[0.1,0.08,0.08]},
+  {p:[0,1.24,-0.09],s:[0.85,0.5,0.06],c:[0.08,0.07,0.07],shin:60},
+  {p:[0,1.24,-0.06],s:[0.78,0.44,0.01],c:[0.15,0.35,0.75],emi:0.6,shin:10},// screen glow
+]},
+{id:'keyboard',name:'キーボード',cat:'furn',vis:true,ox:0.5,oy:0,oz:-4.3,ory:0,parts:[
+  {p:[0,0.79,0.22],s:[0.55,0.025,0.2],c:[0.12,0.12,0.15]},
+  {p:[0,0.806,0.22],s:[0.5,0.015,0.17],c:[0.18,0.18,0.22]},
+]},
+{id:'mouse',name:'マウス',cat:'furn',vis:true,ox:0.5,oy:0,oz:-4.3,ory:0,parts:[
+  {p:[0.38,0.79,0.22],s:[0.07,0.03,0.12],c:[0.1,0.1,0.12]},
+]},
+{id:'speakers',name:'スピーカー',cat:'furn',vis:true,ox:0.5,oy:0,oz:-4.3,ory:0,parts:[
+  {p:[-0.6,0.94,-0.24],s:[0.1,0.2,0.12],c:[0.1,0.1,0.12]},
+  {p:[0.6,0.94,-0.24],s:[0.1,0.2,0.12],c:[0.1,0.1,0.12]},
+  {p:[-0.6,0.94,-0.18],s:[0.06,0.06,0.01],c:[0.5,0.5,0.5]},
+  {p:[0.6,0.94,-0.18],s:[0.06,0.06,0.01],c:[0.5,0.5,0.5]},
+]},
+
+// ---- GAMING CHAIR ----
+{id:'chair',name:'ゲーミングチェア',cat:'furn',vis:true,ox:1.0,oy:0,oz:-3.0,ory:0,parts:[
+  {p:[0,0.45,0],s:[0.6,0.09,0.58],c:[0.08,0.08,0.22]},
+  {p:[0,0.85,-0.27],s:[0.58,0.8,0.08],c:[0.08,0.08,0.22]},
+  {p:[0,1.25,-0.27],s:[0.52,0.18,0.07],c:[0.1,0.1,0.28]},// headrest
+  {p:[-0.31,0.68,-0.12],s:[0.06,0.06,0.52],c:[0.06,0.06,0.08]},// arm L
+  {p:[0.31,0.68,-0.12],s:[0.06,0.06,0.52],c:[0.06,0.06,0.08]},// arm R
+  {p:[-0.31,0.63,-0.12],s:[0.09,0.05,0.05],c:[0.2,0.2,0.2]},// arm pad L
+  {p:[0.31,0.63,-0.12],s:[0.09,0.05,0.05],c:[0.2,0.2,0.2]},// arm pad R
+  {p:[0,0.24,0],s:[0.07,0.44,0.07],c:[0.08,0.08,0.08]},// center pole
+  {p:[0,0.06,0],s:[0.55,0.04,0.08],c:[0.1,0.1,0.1]},// base cross A
+  {p:[0,0.06,0],s:[0.08,0.04,0.55],c:[0.1,0.1,0.1]},// base cross B
+  {p:[-0.24,0.04,0],s:[0.08,0.04,0.08],c:[0.15,0.15,0.15]},// wheel
+  {p:[0.24,0.04,0],s:[0.08,0.04,0.08],c:[0.15,0.15,0.15]},
+  {p:[0,0.04,-0.24],s:[0.08,0.04,0.08],c:[0.15,0.15,0.15]},
+  {p:[0,0.04,0.24],s:[0.08,0.04,0.08],c:[0.15,0.15,0.15]},
+  // accent strips (red)
+  {p:[-0.28,0.85,-0.23],s:[0.02,0.78,0.01],c:[0.85,0.1,0.1]},
+  {p:[0.28,0.85,-0.23],s:[0.02,0.78,0.01],c:[0.85,0.1,0.1]},
+]},
+
+// ---- TV + STAND ----
+{id:'tv_stand',name:'テレビ台',cat:'furn',vis:true,ox:-4.5,oy:0,oz:-2.5,ory:0,parts:[
+  {p:[0,0.3,0],s:[0.35,0.6,1.4],c:[0.28,0.22,0.18]},
+  {p:[0,0.02,0],s:[0.5,0.04,1.5],c:[0.22,0.17,0.13]},
+  {p:[0,0.32,0],s:[0.3,0.02,1.3],c:[0.32,0.26,0.2]},// shelf
+  {p:[0,0.58,0],s:[0.3,0.02,1.3],c:[0.32,0.26,0.2]},
+  {p:[-0.6,0.3,0],s:[0.02,0.3,0.02],c:[0.2,0.15,0.1]},// small legs
+  {p:[0.6,0.3,0],s:[0.02,0.3,0.02],c:[0.2,0.15,0.1]},
+]},
+{id:'tv',name:'テレビ',cat:'furn',vis:true,ox:-4.5,oy:0,oz:-2.5,ory:0,parts:[
+  {p:[0.06,1.35,0],s:[0.12,0.85,1.5],c:[0.08,0.07,0.07],shin:80},
+  {p:[0.13,1.35,0],s:[0.01,0.75,1.4],c:[0.15,0.32,0.7],emi:0.5,shin:5},// screen
+  {p:[0.1,0.62,0],s:[0.08,0.04,0.25],c:[0.1,0.1,0.1]},// stand
+  {p:[0.1,0.65,0],s:[0.22,0.06,0.35],c:[0.12,0.12,0.12]},
+]},
+
+// ---- BOOKSHELF ----
+{id:'bookshelf',name:'本棚',cat:'furn',vis:true,ox:4.45,oy:0,oz:-1.5,ory:0,parts:[
+  {p:[0,1.25,0],s:[0.25,2.5,1.4],c:[0.55,0.42,0.28]},// frame
+  {p:[-0.08,2.45,0],s:[0.1,0.04,1.35],c:[0.5,0.38,0.25]},// top shelf
+  {p:[-0.08,1.85,0],s:[0.1,0.04,1.35],c:[0.5,0.38,0.25]},
+  {p:[-0.08,1.25,0],s:[0.1,0.04,1.35],c:[0.5,0.38,0.25]},
+  {p:[-0.08,0.65,0],s:[0.1,0.04,1.35],c:[0.5,0.38,0.25]},
+  {p:[-0.08,0.05,0],s:[0.1,0.04,1.35],c:[0.5,0.38,0.25]},// bottom
+  // books top shelf
+  {p:[-0.1,2.6,-0.5],s:[0.12,0.24,0.07],c:[0.8,0.2,0.2]},
+  {p:[-0.1,2.6,-0.4],s:[0.12,0.22,0.07],c:[0.2,0.5,0.8]},
+  {p:[-0.1,2.6,-0.3],s:[0.12,0.2,0.07],c:[0.2,0.7,0.3]},
+  {p:[-0.1,2.6,-0.2],s:[0.12,0.25,0.07],c:[0.9,0.7,0.1]},
+  {p:[-0.1,2.6,-0.1],s:[0.12,0.18,0.07],c:[0.7,0.2,0.7]},
+  {p:[-0.1,2.6,0.0],s:[0.12,0.23,0.07],c:[0.9,0.4,0.1]},
+  {p:[-0.1,2.6,0.1],s:[0.12,0.2,0.07],c:[0.1,0.4,0.6]},
+  {p:[-0.1,2.6,0.2],s:[0.12,0.22,0.07],c:[0.6,0.1,0.1]},
+  {p:[-0.1,2.6,0.3],s:[0.12,0.19,0.07],c:[0.3,0.6,0.6]},
+  {p:[-0.1,2.6,0.4],s:[0.12,0.21,0.07],c:[0.8,0.3,0.5]},
+  // books 2nd shelf - anime figures
+  {p:[-0.06,1.98,-0.45],s:[0.06,0.2,0.06],c:[0.95,0.8,0.85]},// figure1
+  {p:[-0.06,1.985,-0.45],s:[0.04,0.04,0.04],c:[0.9,0.4,0.5]},// hair
+  {p:[-0.06,1.98,-0.3],s:[0.06,0.22,0.06],c:[0.85,0.92,0.95]},// figure2
+  {p:[-0.06,1.985,-0.3],s:[0.04,0.04,0.04],c:[0.5,0.7,0.9]},
+  {p:[-0.06,1.98,-0.15],s:[0.06,0.2,0.06],c:[0.9,0.85,0.92]},
+  {p:[-0.06,1.985,-0.15],s:[0.04,0.04,0.04],c:[0.8,0.2,0.8]},
+  {p:[-0.1,2.02,0.1],s:[0.12,0.22,0.07],c:[1.0,0.3,0.1]},
+  {p:[-0.1,2.02,0.2],s:[0.12,0.19,0.07],c:[0.1,0.6,0.9]},
+  {p:[-0.1,2.02,0.3],s:[0.12,0.2,0.07],c:[0.7,0.7,0.1]},
+  {p:[-0.1,2.02,0.4],s:[0.12,0.22,0.07],c:[0.3,0.3,0.8]},
+  // manga row 3rd
+  {p:[-0.1,1.42,-0.5],s:[0.09,0.24,0.05],c:[0.9,0.9,0.9]},
+  {p:[-0.1,1.42,-0.44],s:[0.09,0.22,0.05],c:[0.8,0.1,0.2]},
+  {p:[-0.1,1.42,-0.38],s:[0.09,0.23,0.05],c:[0.1,0.2,0.8]},
+  {p:[-0.1,1.42,-0.32],s:[0.09,0.24,0.05],c:[0.1,0.7,0.2]},
+  {p:[-0.1,1.42,-0.26],s:[0.09,0.22,0.05],c:[0.9,0.6,0.1]},
+  {p:[-0.1,1.42,-0.2],s:[0.09,0.21,0.05],c:[0.5,0.1,0.5]},
+  {p:[-0.1,1.42,-0.14],s:[0.09,0.23,0.05],c:[0.8,0.8,0.2]},
+  {p:[-0.1,1.42,-0.08],s:[0.09,0.22,0.05],c:[0.2,0.8,0.7]},
+  {p:[-0.1,1.42,-0.02],s:[0.09,0.21,0.05],c:[0.9,0.3,0.7]},
+  // bottom shelf stuff
+  {p:[-0.08,0.38,-0.4],s:[0.18,0.58,0.55],c:[0.12,0.1,0.08]},// game console box
+  {p:[-0.08,0.38,-0.4],s:[0.19,0.04,0.56],c:[0.18,0.15,0.12]},// top lid
+  {p:[-0.05,0.38,0.3],s:[0.1,0.14,0.08],c:[0.08,0.08,0.1]},// controller
+  {p:[-0.05,0.38,0.4],s:[0.1,0.14,0.08],c:[0.08,0.08,0.1]},
+]},
+
+// ---- BED ----
+{id:'bed',name:'ベッド',cat:'furn',vis:true,ox:-2.8,oy:0,oz:2.0,ory:0,parts:[
+  {p:[0,0.12,0],s:[1.1,0.24,2.2],c:[0.22,0.16,0.11]},// frame
+  {p:[0,0.27,0],s:[1.0,0.06,2.0],c:[0.88,0.88,0.92]},// mattress
+  {p:[0,0.34,0],s:[1.0,0.12,1.6],c:[0.12,0.15,0.38]},// blanket (dark blue)
+  {p:[-0.1,0.37,0],s:[0.85,0.04,1.45],c:[0.15,0.18,0.42]},// blanket fold
+  {p:[0,0.34,-0.88],s:[0.95,0.15,0.18],c:[0.9,0.88,0.9]},// pillow
+  {p:[0.1,0.35,-0.88],s:[0.65,0.06,0.16],c:[0.95,0.93,0.95]},// pillow cover
+  {p:[0,0.24,-1.08],s:[1.08,0.5,0.06],c:[0.22,0.16,0.11]},// headboard
+  {p:[0,0.24,1.08],s:[1.08,0.3,0.06],c:[0.22,0.16,0.11]},// footboard
+  // plushies on bed
+  {p:[-0.3,0.4,-0.6],s:[0.18,0.18,0.18],c:[0.9,0.85,0.88]},// plushie body
+  {p:[-0.3,0.5,-0.6],s:[0.16,0.15,0.15],c:[0.9,0.85,0.88]},// head
+  {p:[-0.38,0.53,-0.6],s:[0.08,0.07,0.07],c:[0.88,0.83,0.86]},// ear
+  {p:[-0.22,0.53,-0.6],s:[0.08,0.07,0.07],c:[0.88,0.83,0.86]},
+  {p:[0.25,0.4,-0.55],s:[0.2,0.2,0.2],c:[0.3,0.65,0.95]},// blue plushie
+  {p:[0.25,0.52,-0.55],s:[0.18,0.16,0.16],c:[0.28,0.62,0.92]},
+  {p:[0.16,0.55,-0.55],s:[0.09,0.08,0.08],c:[0.25,0.6,0.9]},
+  {p:[0.34,0.55,-0.55],s:[0.09,0.08,0.08],c:[0.25,0.6,0.9]},
+]},
+
+// ---- BLACKBOARD ----
+{id:'blackboard',name:'黒板',cat:'furn',vis:true,ox:-2.5,oy:0,oz:-4.9,ory:0,parts:[
+  {p:[0,1.5,0.04],s:[1.6,1.1,0.06],c:[0.28,0.2,0.14]},// frame
+  {p:[0,1.5,0.08],s:[1.45,0.95,0.02],c:[0.1,0.28,0.14]},// board
+  // chalk marks (rough lines)
+  {p:[-0.35,1.8,0.1],s:[0.55,0.015,0.01],c:[0.9,0.9,0.85]},// lines
+  {p:[-0.35,1.7,0.1],s:[0.45,0.015,0.01],c:[0.9,0.9,0.85]},
+  {p:[-0.35,1.6,0.1],s:[0.5,0.015,0.01],c:[0.9,0.9,0.85]},
+  {p:[-0.35,1.5,0.1],s:[0.4,0.015,0.01],c:[0.9,0.9,0.85]},
+  {p:[-0.35,1.4,0.1],s:[0.5,0.015,0.01],c:[0.9,0.9,0.85]},
+  {p:[-0.35,1.3,0.1],s:[0.35,0.015,0.01],c:[0.9,0.9,0.85]},
+  {p:[-0.6,1.85,0.1],s:[0.3,0.02,0.01],c:[0.95,0.9,0.5]},// title (yellow)
+  // "働いたら負け!!" written at top right
+  {p:[0.2,1.75,0.1],s:[0.5,0.02,0.01],c:[0.95,0.3,0.3]},// red text
+  {p:[0.2,1.65,0.1],s:[0.4,0.015,0.01],c:[0.95,0.3,0.3]},
+  {p:[0.3,1.2,0.1],s:[0.12,0.02,0.01],c:[0.8,0.5,0.8]},// ニート
+  {p:[0.3,1.1,0.1],s:[0.12,0.015,0.01],c:[0.8,0.5,0.8]},
+  // chalk tray
+  {p:[0,1.0,0.06],s:[1.5,0.05,0.08],c:[0.22,0.16,0.12]},
+  {p:[-0.55,1.0,0.1],s:[0.08,0.02,0.05],c:[0.92,0.92,0.88]},// chalk pieces
+  {p:[-0.45,1.0,0.1],s:[0.08,0.02,0.05],c:[0.9,0.88,0.92]},
+  {p:[-0.35,1.0,0.1],s:[0.08,0.02,0.05],c:[0.88,0.92,0.88]},
+]},
+
+// ---- POSTERS ----
+{id:'poster1',name:'ポスター1(アニメ)',cat:'furn',vis:true,ox:1.8,oy:0,oz:-4.9,ory:0,parts:[
+  {p:[0,2.0,0.04],s:[0.85,1.1,0.02],c:[0.95,0.92,0.95]},// white bg
+  {p:[0,2.1,0.06],s:[0.78,0.55,0.01],c:[0.5,0.75,0.95]},// top color block
+  {p:[-0.15,1.7,0.06],s:[0.25,0.7,0.01],c:[0.9,0.5,0.6]},// figure shape
+  {p:[-0.15,2.0,0.07],s:[0.18,0.22,0.01],c:[0.95,0.85,0.8]},// face
+  {p:[-0.15,2.12,0.07],s:[0.2,0.14,0.01],c:[0.15,0.12,0.1]},// hair
+  {p:[0.25,1.85,0.06],s:[0.2,0.04,0.01],c:[0.2,0.2,0.2]},// text line
+  {p:[0.25,1.78,0.06],s:[0.22,0.03,0.01],c:[0.2,0.2,0.2]},
+  {p:[0.25,1.72,0.06],s:[0.18,0.03,0.01],c:[0.2,0.2,0.2]},
+]},
+{id:'poster2',name:'ポスター2',cat:'furn',vis:true,ox:3.2,oy:0,oz:-4.9,ory:0,parts:[
+  {p:[0,1.8,0.04],s:[0.7,0.9,0.02],c:[0.1,0.1,0.12]},// dark bg
+  {p:[0,1.95,0.06],s:[0.62,0.45,0.01],c:[0.8,0.6,0.2]},// logo shape
+  {p:[0,1.6,0.06],s:[0.55,0.1,0.01],c:[0.85,0.85,0.85]},// text
+  {p:[0,1.48,0.06],s:[0.45,0.06,0.01],c:[0.7,0.7,0.7]},
+]},
+{id:'poster3',name:'ポスター3(左壁)',cat:'furn',vis:true,ox:-4.92,oy:0,oz:-1.0,ory:0,parts:[
+  {p:[0.04,2.0,0],s:[0.02,0.9,0.7],c:[0.92,0.9,0.88]},
+  {p:[0.06,2.0,0],s:[0.01,0.8,0.62],c:[0.3,0.5,0.8]},
+  {p:[0.065,2.1,0.05],s:[0.01,0.35,0.25],c:[0.9,0.7,0.7]},// figure
+  {p:[0.065,2.2,0.05],s:[0.01,0.15,0.14],c:[0.95,0.85,0.8]},
+  {p:[0.065,2.28,0.05],s:[0.01,0.1,0.12],c:[0.2,0.15,0.1]},
+]},
+
+// ---- STANDING LAMP ----
+{id:'lamp',name:'フロアランプ',cat:'furn',vis:true,ox:2.5,oy:0,oz:0.5,ory:0,parts:[
+  {p:[0,0.02,0],s:[0.3,0.04,0.3],c:[0.2,0.2,0.22]},// base
+  {p:[0,1.2,0],s:[0.04,2.4,0.04],c:[0.25,0.25,0.27]},// pole
+  {p:[0,2.45,0],s:[0.28,0.08,0.04],c:[0.18,0.18,0.18]},// arm
+  {p:[0.12,2.42,0],s:[0.04,0.3,0.28],c:[0.85,0.82,0.78]},// shade
+  {p:[0.12,2.42,0],s:[0.03,0.28,0.25],c:[1.0,0.95,0.8],emi:0.8},// light
+]},
+
+// ---- FLOOR ITEMS ----
+{id:'karaage',name:'唐揚げ',cat:'furn',vis:true,ox:1.2,oy:0,oz:-4.0,ory:0,parts:[
+  {p:[0,0.79,0],s:[0.22,0.08,0.22],c:[0.6,0.4,0.2]},// box
+  {p:[0,0.84,0],s:[0.18,0.06,0.18],c:[0.72,0.48,0.2]},// box open top
+  // karaage pieces
+  {p:[-0.05,0.88,-0.04],s:[0.07,0.06,0.07],c:[0.75,0.42,0.15]},
+  {p:[0.04,0.88,0.02],s:[0.07,0.05,0.08],c:[0.72,0.4,0.12]},
+  {p:[0.0,0.88,-0.06],s:[0.06,0.06,0.06],c:[0.78,0.44,0.16]},
+  {p:[-0.04,0.88,0.06],s:[0.07,0.05,0.07],c:[0.7,0.38,0.14]},
+]},
+{id:'cola',name:'コーラゼロ',cat:'furn',vis:true,ox:0.3,oy:0,oz:-4.1,ory:0,parts:[
+  {p:[0,0.92,0],s:[0.09,0.28,0.09],c:[0.08,0.06,0.06]},// bottle body
+  {p:[0,1.08,0],s:[0.06,0.04,0.06],c:[0.15,0.12,0.12]},// cap area
+  {p:[0,1.1,0],s:[0.05,0.03,0.05],c:[0.9,0.1,0.1]},// red cap
+  {p:[0,0.92,0],s:[0.075,0.22,0.075],c:[0.9,0.1,0.1],emi:0.05},// red label
+]},
+{id:'controller',name:'ゲームパッド',cat:'furn',vis:true,ox:1.6,oy:0,oz:-4.0,ory:0.3,parts:[
+  {p:[0,0.795,0],s:[0.2,0.04,0.12],c:[0.08,0.08,0.1]},
+  {p:[-0.07,0.795,0.02],s:[0.06,0.04,0.08],c:[0.06,0.06,0.08]},// left grip
+  {p:[0.07,0.795,0.02],s:[0.06,0.04,0.08],c:[0.06,0.06,0.08]},
+  {p:[-0.06,0.815,-0.02],s:[0.04,0.01,0.04],c:[0.6,0.6,0.65]},// dpad
+  {p:[0.06,0.815,-0.02],s:[0.04,0.01,0.04],c:[0.8,0.15,0.15]},// buttons
+  {p:[0.05,0.815,-0.04],s:[0.015,0.015,0.015],c:[0.15,0.8,0.15]},
+  {p:[0.07,0.815,-0.02],s:[0.015,0.015,0.015],c:[0.15,0.15,0.9]},
+  {p:[0.05,0.815,0],s:[0.015,0.015,0.015],c:[0.9,0.8,0.1]},
+]},
+{id:'trash',name:'ゴミ・散らかり',cat:'furn',vis:true,ox:0,oy:0,oz:0,ory:0,parts:[
+  {p:[-3.5,0.02,1.0],s:[0.15,0.04,0.12],c:[0.7,0.7,0.75]},// plastic bag
+  {p:[-3.3,0.02,1.2],s:[0.12,0.06,0.1],c:[0.75,0.72,0.7]},// paper
+  {p:[1.8,0.02,-3.8],s:[0.1,0.03,0.08],c:[0.85,0.83,0.8]},// paper
+  {p:[-1.0,0.02,1.5],s:[0.18,0.08,0.18],c:[0.12,0.1,0.1]},// empty can
+  {p:[-1.0,0.1,1.5],s:[0.08,0.02,0.08],c:[0.1,0.08,0.08]},
+  {p:[0.5,0.02,1.8],s:[0.1,0.04,0.08],c:[0.6,0.4,0.2]},// snack wrapper
+  {p:[0.6,0.02,1.7],s:[0.08,0.04,0.07],c:[0.65,0.45,0.25]},
+  {p:[-2.0,0.02,2.5],s:[0.25,0.14,0.25],c:[0.12,0.12,0.14]},// backpack
+  {p:[-2.0,0.17,2.5],s:[0.22,0.02,0.22],c:[0.1,0.1,0.12]},
+]},
+{id:'cushion',name:'クッション',cat:'furn',vis:true,ox:-0.5,oy:0,oz:0.0,ory:0.3,parts:[
+  {p:[0,0.08,0],s:[0.7,0.16,0.7],c:[0.55,0.4,0.65]},// purple cushion
+  {p:[0,0.16,0],s:[0.62,0.04,0.62],c:[0.62,0.47,0.72]},
+]},
+{id:'figures_desk',name:'デスク上の雑貨',cat:'furn',vis:true,ox:0.8,oy:0,oz:-4.3,ory:0,parts:[
+  // cup with pens
+  {p:[-0.7,0.82,-0.32],s:[0.06,0.1,0.06],c:[0.3,0.5,0.7]},
+  {p:[-0.72,0.89,-0.32],s:[0.01,0.12,0.01],c:[0.1,0.1,0.1]},
+  {p:[-0.68,0.87,-0.32],s:[0.01,0.1,0.01],c:[0.8,0.2,0.1]},
+  {p:[-0.74,0.9,-0.34],s:[0.01,0.14,0.01],c:[0.1,0.5,0.2]},
+  // mini figure
+  {p:[0.65,0.82,-0.3],s:[0.05,0.12,0.05],c:[0.9,0.75,0.7]},
+  {p:[0.65,0.9,-0.3],s:[0.07,0.06,0.07],c:[0.95,0.8,0.75]},
+  {p:[0.65,0.93,-0.3],s:[0.07,0.04,0.06],c:[0.15,0.12,0.1]},
+  // sticky notes on wall
+  {p:[0.2,1.35,-0.39],s:[0.12,0.12,0.01],c:[1.0,0.95,0.5]},
+  {p:[0.35,1.4,-0.39],s:[0.1,0.1,0.01],c:[0.95,0.6,0.7]},
+  {p:[0.05,1.45,-0.39],s:[0.1,0.1,0.01],c:[0.6,0.9,0.75]},
+]},
+
+// ---- CHARACTER ----
+{id:'character',name:'キャラクター(NEETちゃん)',cat:'char',vis:true,ox:1.0,oy:0.45,oz:-3.0,ory:0,parts:[
+  // upper legs (on seat)
+  {p:[-0.12,0.04,0.12],s:[0.12,0.07,0.42],c:[0.12,0.12,0.14]},
+  {p:[0.12,0.04,0.12],s:[0.12,0.07,0.42],c:[0.12,0.12,0.14]},
+  // lower legs (dangling)
+  {p:[-0.12,-0.22,0.4],s:[0.1,0.44,0.09],c:[0.12,0.12,0.14]},
+  {p:[0.12,-0.22,0.4],s:[0.1,0.44,0.09],c:[0.12,0.12,0.14]},
+  // feet
+  {p:[-0.12,-0.46,0.46],s:[0.1,0.06,0.16],c:[0.08,0.08,0.1]},
+  {p:[0.12,-0.46,0.46],s:[0.1,0.06,0.16],c:[0.08,0.08,0.1]},
+  // torso (hoodie - near black)
+  {p:[0,0.25,0],s:[0.38,0.44,0.24],c:[0.1,0.1,0.11]},
+  // hoodie pocket
+  {p:[0,0.14,0.12],s:[0.24,0.1,0.02],c:[0.09,0.09,0.1]},
+  // hoodie text accent
+  {p:[0,0.28,0.12],s:[0.12,0.08,0.01],c:[0.15,0.15,0.18]},
+  // neck
+  {p:[0,0.5,0.02],s:[0.1,0.1,0.1],c:[1.0,0.84,0.72]},
+  // head
+  {p:[0,0.66,0.01],s:[0.26,0.27,0.23],c:[1.0,0.84,0.72]},
+  // face details
+  {p:[-0.07,0.67,0.115],s:[0.05,0.045,0.01],c:[0.2,0.18,0.22]},// eye L
+  {p:[0.07,0.67,0.115],s:[0.05,0.045,0.01],c:[0.2,0.18,0.22]},// eye R
+  {p:[-0.07,0.67,0.12],s:[0.03,0.03,0.01],c:[0.25,0.22,0.3]},// iris L
+  {p:[0.07,0.67,0.12],s:[0.03,0.03,0.01],c:[0.25,0.22,0.3]},// iris R
+  {p:[0,0.6,0.12],s:[0.07,0.02,0.01],c:[0.9,0.5,0.55]},// mouth
+  // blush
+  {p:[-0.1,0.64,0.11],s:[0.05,0.02,0.01],c:[0.95,0.65,0.65]},
+  {p:[0.1,0.64,0.11],s:[0.05,0.02,0.01],c:[0.95,0.65,0.65]},
+  // HAIR - main back (long black)
+  {p:[0,0.65,-0.12],s:[0.28,0.35,0.06],c:[0.12,0.09,0.07]},// back upper
+  {p:[0,0.3,-0.12],s:[0.26,0.42,0.07],c:[0.12,0.09,0.07]},// back lower
+  {p:[-0.14,0.5,-0.05],s:[0.06,0.55,0.12],c:[0.12,0.09,0.07]},// side L
+  {p:[0.14,0.5,-0.05],s:[0.06,0.55,0.12],c:[0.12,0.09,0.07]},// side R
+  {p:[-0.14,0.1,-0.04],s:[0.07,0.25,0.14],c:[0.12,0.09,0.07]},// lower side L
+  {p:[0.14,0.1,-0.04],s:[0.07,0.25,0.14],c:[0.12,0.09,0.07]},// lower side R
+  // front hair
+  {p:[-0.06,0.82,0.08],s:[0.12,0.08,0.1],c:[0.12,0.09,0.07]},// front bang L
+  {p:[0.06,0.82,0.08],s:[0.1,0.08,0.1],c:[0.12,0.09,0.07]},// front bang R
+  {p:[0,0.85,0.06],s:[0.18,0.06,0.08],c:[0.12,0.09,0.07]},// top center
+  // ahoge
+  {p:[0.04,0.9,0.04],s:[0.03,0.06,0.03],c:[0.13,0.1,0.08]},
+  // hair clip (cat shape - gray/purple)
+  {p:[-0.13,0.78,0.06],s:[0.05,0.03,0.04],c:[0.55,0.5,0.7]},
+  {p:[-0.16,0.81,0.06],s:[0.03,0.03,0.02],c:[0.55,0.5,0.7]},// ear
+  {p:[-0.1,0.81,0.06],s:[0.03,0.03,0.02],c:[0.55,0.5,0.7]},
+  // RIGHT ARM - holding karaage box
+  {p:[0.24,0.28,0.08],s:[0.1,0.1,0.36],c:[0.1,0.1,0.11]},// upper arm
+  {p:[0.38,0.23,0.28],s:[0.09,0.1,0.22],c:[0.1,0.1,0.11]},// forearm
+  {p:[0.42,0.22,0.38],s:[0.08,0.07,0.08],c:[1.0,0.84,0.72]},// hand
+  // karaage in hand
+  {p:[0.42,0.28,0.38],s:[0.1,0.04,0.1],c:[0.58,0.38,0.18]},
+  {p:[0.42,0.31,0.38],s:[0.08,0.05,0.08],c:[0.72,0.42,0.15]},
+  {p:[0.44,0.34,0.38],s:[0.05,0.04,0.05],c:[0.75,0.44,0.16]},// karaage piece
+  // LEFT ARM - holding cola glass
+  {p:[-0.24,0.28,0.08],s:[0.1,0.1,0.36],c:[0.1,0.1,0.11]},// upper arm
+  {p:[-0.38,0.23,0.28],s:[0.09,0.1,0.22],c:[0.1,0.1,0.11]},// forearm
+  {p:[-0.42,0.22,0.38],s:[0.08,0.07,0.08],c:[1.0,0.84,0.72]},// hand
+  // cola glass in hand
+  {p:[-0.42,0.28,0.38],s:[0.06,0.12,0.06],c:[0.6,0.7,0.85],emi:0.1},// glass
+  {p:[-0.42,0.35,0.38],s:[0.05,0.02,0.05],c:[0.15,0.12,0.12]},// drink
+  // ice cubes
+  {p:[-0.44,0.31,0.36],s:[0.02,0.02,0.02],c:[0.9,0.95,1.0]},
+  {p:[-0.4,0.3,0.4],s:[0.02,0.02,0.02],c:[0.9,0.95,1.0]},
+]},
+
+// ---- CEILING LIGHT ----
+{id:'ceiling_light',name:'シーリングライト',cat:'furn',vis:true,ox:0,oy:0,oz:-1.5,ory:0,parts:[
+  {p:[0,2.98,0],s:[0.8,0.04,0.8],c:[0.9,0.88,0.85]},
+  {p:[0,2.95,0],s:[0.72,0.06,0.72],c:[0.98,0.97,0.95],emi:1.0,shin:1},// glow
+  {p:[0,2.94,0],s:[0.65,0.02,0.65],c:[1.0,0.98,0.95],emi:1.2,shin:1},
+]},
+
+// ---- WINDOW ----
+{id:'window',name:'窓',cat:'room',vis:true,ox:2.5,oy:0,oz:-4.9,ory:0,parts:[
+  {p:[0,1.7,0.02],s:[1.2,1.0,0.06],c:[0.7,0.65,0.6]},// frame
+  {p:[0,1.7,0.06],s:[1.1,0.9,0.02],c:[0.6,0.75,0.88],emi:0.3,shin:100},// glass
+  {p:[0,1.7,0.04],s:[0.02,0.88,0.03],c:[0.72,0.67,0.62]},// center bar H
+  {p:[0,1.7,0.04],s:[1.08,0.02,0.03],c:[0.72,0.67,0.62]},// center bar V
+  // curtains
+  {p:[-0.7,1.7,0.08],s:[0.25,1.1,0.06],c:[0.55,0.45,0.65]},// curtain L
+  {p:[0.7,1.7,0.08],s:[0.25,1.1,0.06],c:[0.55,0.45,0.65]},// curtain R
+  {p:[-0.7,2.27,0.06],s:[0.22,0.06,0.06],c:[0.48,0.38,0.58]},// curtain fold L
+  {p:[0.7,2.27,0.06],s:[0.22,0.06,0.06],c:[0.48,0.38,0.58]},
+  {p:[0,2.3,0.06],s:[1.6,0.05,0.08],c:[0.35,0.28,0.4]},// curtain rail
+]},
+
+// ---- MISCELLANEOUS ----
+{id:'mini_fridge',name:'ミニ冷蔵庫',cat:'furn',vis:true,ox:-4.5,oy:0,oz:1.5,ory:0,parts:[
+  {p:[0,0.45,0],s:[0.55,0.9,0.5],c:[0.85,0.85,0.87]},
+  {p:[0.28,0.55,0],s:[0.02,0.65,0.35],c:[0.6,0.6,0.62]},// door front
+  {p:[0.29,0.5,0],s:[0.01,0.04,0.08],c:[0.5,0.5,0.52]},// handle
+  {p:[0,0.05,0],s:[0.58,0.08,0.52],c:[0.75,0.75,0.77]},// base
+  {p:[0,0.92,0],s:[0.55,0.06,0.5],c:[0.8,0.8,0.82]},// top
+]},
+{id:'pile_clothes',name:'脱ぎ散らかした服',cat:'furn',vis:true,ox:-1.5,oy:0,oz:1.0,ory:0.5,parts:[
+  {p:[0,0.03,0],s:[0.5,0.06,0.4],c:[0.2,0.2,0.25]},
+  {p:[0.1,0.07,0.05],s:[0.4,0.04,0.3],c:[0.35,0.3,0.4]},
+  {p:[-0.05,0.1,0.08],s:[0.35,0.05,0.28],c:[0.15,0.25,0.38]},
+]},
+{id:'tissue_box',name:'ティッシュ',cat:'furn',vis:true,ox:-0.2,oy:0,oz:-4.1,ory:0,parts:[
+  {p:[0,0.82,0],s:[0.2,0.1,0.12],c:[0.9,0.88,0.85]},
+  {p:[0,0.88,0],s:[0.18,0.02,0.1],c:[0.6,0.75,0.85]},// blue stripe
+  {p:[0,0.87,0],s:[0.08,0.03,0.04],c:[0.95,0.95,0.95]},// tissue out
+]},
+];
+
+// ===== RENDER STATE =====
+let proj=m4.id();
+let viewMat=m4.id();
+
+function render(){
+  gl.clearColor(0.05,0.05,0.1,1);
+  gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST);
+  gl.enable(gl.CULL_FACE);
+
+  proj=m4.pers(Math.PI/4,canvas.width/canvas.height,0.1,50);
+  const eye=cam.pos;
+  const tgt=[cam.target[0]+cam.pan[0],cam.target[1]+cam.pan[1],cam.target[2]+cam.pan[2]];
+  viewMat=m4.lookAt(eye,tgt,[0,1,0]);
+
+  gl.uniformMatrix4fv(U.uV,false,viewMat);
+  gl.uniformMatrix4fv(U.uPr,false,proj);
+  gl.uniform3fv(U.uCam,eye);
+
+  const amb=[state.ambR,state.ambG,state.ambB];
+  gl.uniform3fv(U.uAmb,amb);
+  gl.uniform3fv(U.uL1P,[state.l1x,state.l1y,state.l1z]);
+  gl.uniform3fv(U.uL1C,[state.l1r*state.l1i,state.l1g*state.l1i,state.l1b*state.l1i]);
+  gl.uniform3fv(U.uL2P,[state.l2x,state.l2y,state.l2z]);
+  gl.uniform3fv(U.uL2C,[state.l2r*state.l2i,state.l2g*state.l2i,state.l2b*state.l2i]);
+
+  // resolve color aliases
+  function resolveColor(c){
+    if(c==='wall')return state.wallColor;
+    if(c==='floor')return state.floorColor;
+    if(c==='ceil')return state.ceilColor;
+    return c;
+  }
+
+  for(const obj of OBJS){
+    if(!obj.vis)continue;
+    // special: character position from state
+    let ox=obj.ox, oy=obj.oy, oz=obj.oz, ory=obj.ory;
+    if(obj.id==='character'){
+      if(!state.charVisible)continue;
+      ox=state.charX; oz=state.charZ; ory=state.charRY;
+    }
+    for(const pt of obj.parts){
+      // world pos = obj origin + rotated part offset
+      const cosR=Math.cos(ory),sinR=Math.sin(ory);
+      const px=pt.p[0]*cosR+pt.p[2]*sinR+ox;
+      const py=pt.p[1]+oy;
+      const pz=-pt.p[0]*sinR+pt.p[2]*cosR+oz;
+      const ry=(pt.ry||0)+ory;
+      const c=resolveColor(pt.c);
+      drawBox([px,py,pz],pt.s,c,ry,pt.emi||0,pt.shin||32);
+    }
+  }
+
+  requestAnimationFrame(render);
+}
+
+// ===== CAMERA CONTROLS =====
+let mouse={down:false,right:false,x:0,y:0};
+canvas.addEventListener('mousedown',e=>{
+  mouse.down=true;
+  mouse.right=(e.button===2);
+  mouse.x=e.clientX;mouse.y=e.clientY;
+});
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+window.addEventListener('mouseup',()=>mouse.down=false);
+window.addEventListener('mousemove',e=>{
+  if(!mouse.down)return;
+  const dx=(e.clientX-mouse.x)*0.005;
+  const dy=(e.clientY-mouse.y)*0.005;
+  mouse.x=e.clientX;mouse.y=e.clientY;
+  if(mouse.right){
+    // pan
+    const t=cam.theta;
+    cam.pan[0]-=Math.cos(t)*dx*cam.dist*0.3;
+    cam.pan[2]+=Math.sin(t)*dx*cam.dist*0.3;
+    cam.pan[1]+=dy*cam.dist*0.3;
+  } else {
+    cam.theta+=dx;
+    cam.phi=Math.max(-1.4,Math.min(1.4,cam.phi-dy));
+  }
+});
+canvas.addEventListener('wheel',e=>{
+  cam.dist=Math.max(1.5,Math.min(18,cam.dist+e.deltaY*0.01));
+});
+
+const keys={};
+window.addEventListener('keydown',e=>{keys[e.key]=true;handleKey(e.key);});
+window.addEventListener('keyup',e=>keys[e.key]=false);
+
+function handleKey(k){
+  const step=0.15;
+  if(k==='ArrowLeft')state.charX-=step;
+  if(k==='ArrowRight')state.charX+=step;
+  if(k==='ArrowUp')state.charZ-=step;
+  if(k==='ArrowDown')state.charZ+=step;
+  if(k==='q'||k==='Q')state.charRY-=0.1;
+  if(k==='e'||k==='E')state.charRY+=0.1;
+  updateCharUI();
+}
+
+// ===== UI =====
+function showTab(id){
+  document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+  document.getElementById('tab-'+id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+function cr(label,type,opts,onChange){
+  const d=document.createElement('div');d.className='cr';
+  const l=document.createElement('label');l.textContent=label;
+  const i=document.createElement('input');
+  i.type=type;
+  Object.assign(i,opts);
+  const sp=document.createElement('span');
+  if(type==='range'){
+    sp.textContent=parseFloat(opts.value).toFixed(2);
+    i.oninput=()=>{sp.textContent=parseFloat(i.value).toFixed(2);onChange(parseFloat(i.value));};
+  } else {
+    i.oninput=()=>onChange(i.value);
+  }
+  d.appendChild(l);d.appendChild(i);
+  if(type==='range')d.appendChild(sp);
+  return{el:d,input:i,span:sp};
+}
+
+function colorCR(label,initColor,onChange){
+  const d=document.createElement('div');d.className='cr';
+  const l=document.createElement('label');l.textContent=label;
+  const i=document.createElement('input');i.type='color';
+  i.value=rgb2hex(initColor);
+  i.oninput=()=>onChange(hex2rgb(i.value));
+  d.appendChild(l);d.appendChild(i);
+  return d;
+}
+
+function rgb2hex(c){
+  return '#'+c.map(v=>Math.round(v*255).toString(16).padStart(2,'0')).join('');
+}
+function hex2rgb(h){
+  const r=parseInt(h.slice(1,3),16)/255;
+  const g=parseInt(h.slice(3,5),16)/255;
+  const b=parseInt(h.slice(5,7),16)/255;
+  return[r,g,b];
+}
+
+function sec(title){
+  const d=document.createElement('div');d.className='sec';
+  const t=document.createElement('div');t.className='sec-title';t.textContent=title;
+  d.appendChild(t);return d;
+}
+
+function buildUI(){
+  // ---- ROOM TAB ----
+  const rt=document.getElementById('tab-room');
+  const rs=sec('🎨 カラー設定');
+  rs.appendChild(colorCR('壁の色',state.wallColor,v=>state.wallColor=v));
+  rs.appendChild(colorCR('床の色',state.floorColor,v=>state.floorColor=v));
+  rs.appendChild(colorCR('天井の色',state.ceilColor,v=>state.ceilColor=v));
+  rt.appendChild(rs);
+
+  const ws=sec('🪟 窓・カーテン');
+  const wobj=OBJS.find(o=>o.id==='window');
+  const wd=document.createElement('div');wd.className='ti';
+  const wc=document.createElement('input');wc.type='checkbox';wc.checked=wobj.vis;
+  wc.onchange=()=>wobj.vis=wc.checked;
+  const wl=document.createElement('span');wl.textContent='窓を表示';
+  wd.appendChild(wc);wd.appendChild(wl);ws.appendChild(wd);
+  rt.appendChild(ws);
+
+  const ps=sec('🏠 部屋のパーツ');
+  ['back_wall','left_wall','right_wall','ceiling','baseboard'].forEach(id=>{
+    const obj=OBJS.find(o=>o.id===id);
+    const d=document.createElement('div');d.className='ti';
+    const c=document.createElement('input');c.type='checkbox';c.checked=obj.vis;
+    c.onchange=()=>obj.vis=c.checked;
+    const l=document.createElement('span');l.textContent=obj.name;
+    d.appendChild(c);d.appendChild(l);ps.appendChild(d);
+  });
+  rt.appendChild(ps);
+
+  // ---- FURNITURE TAB ----
+  const ft=document.getElementById('tab-furn');
+  const cats={
+    'デスク周り':['desk','monitor','keyboard','mouse','speakers','figures_desk','karaage','cola','controller','tissue_box'],
+    'チェア':['chair'],
+    'テレビ':['tv','tv_stand'],
+    '本棚':['bookshelf'],
+    'ベッド':['bed'],
+    '黒板':['blackboard'],
+    'ポスター':['poster1','poster2','poster3'],
+    '照明':['lamp','ceiling_light'],
+    '小物':['cushion','mini_fridge','pile_clothes','trash'],
+  };
+  for(const[cat,ids] of Object.entries(cats)){
+    const s=sec(cat);
+    for(const id of ids){
+      const obj=OBJS.find(o=>o.id===id);
+      if(!obj)continue;
+      const d=document.createElement('div');d.className='ti';
+      const c=document.createElement('input');c.type='checkbox';c.checked=obj.vis;
+      c.onchange=()=>obj.vis=c.checked;
+      const l=document.createElement('span');l.textContent=obj.name;
+      d.appendChild(c);d.appendChild(l);s.appendChild(d);
+    }
+    ft.appendChild(s);
+  }
+
+  // ---- CHARACTER TAB ----
+  const ct=document.getElementById('tab-char');
+  const cvs=sec('👧 キャラクター');
+  const cvd=document.createElement('div');cvd.className='ti';
+  const cvc=document.createElement('input');cvc.type='checkbox';cvc.checked=state.charVisible;
+  cvc.onchange=()=>state.charVisible=cvc.checked;
+  const cvl=document.createElement('span');cvl.textContent='キャラを表示';
+  cvd.appendChild(cvc);cvd.appendChild(cvl);cvs.appendChild(cvd);
+  ct.appendChild(cvs);
+
+  const cps=sec('📍 位置・回転');
+  const xr=cr('X位置','range',{min:-4.5,max:4.5,step:0.05,value:state.charX},v=>state.charX=v);
+  const zr=cr('Z位置','range',{min:-4.5,max:4.5,step:0.05,value:state.charZ},v=>state.charZ=v);
+  const rr=cr('回転(Y)','range',{min:-Math.PI,max:Math.PI,step:0.05,value:state.charRY},v=>state.charRY=v);
+  window._charXInput=xr.input;window._charZInput=zr.input;window._charRYInput=rr.input;
+  window._charXSpan=xr.span;window._charZSpan=zr.span;window._charRYSpan=rr.span;
+  cps.appendChild(xr.el);cps.appendChild(zr.el);cps.appendChild(rr.el);
+  ct.appendChild(cps);
+
+  const ccs=sec('🪑 椅子との連動');
+  const linkBtn=document.createElement('button');
+  linkBtn.textContent='デスクチェアに座らせる';
+  linkBtn.style.cssText='width:100%;padding:6px;background:#223;color:#adf;border:1px solid #446;border-radius:4px;cursor:pointer;font-size:11px;margin-bottom:4px;';
+  linkBtn.onclick=()=>{state.charX=1.0;state.charZ=-3.0;state.charRY=0;updateCharUI();};
+  const standBtn=document.createElement('button');
+  standBtn.textContent='床に立たせる (Y=0)';
+  standBtn.style.cssText='width:100%;padding:6px;background:#223;color:#adf;border:1px solid #446;border-radius:4px;cursor:pointer;font-size:11px;';
+  standBtn.onclick=()=>{
+    const charObj=OBJS.find(o=>o.id==='character');
+    charObj.oy=0;charObj.parts.forEach(p=>{p.p[1]+=0.45;});
+  };
+  ccs.appendChild(linkBtn);ccs.appendChild(standBtn);
+  ct.appendChild(ccs);
+
+  const inf=document.createElement('div');inf.className='info';
+  inf.textContent='矢印キー: 移動 | Q/E: 回転';
+  ct.appendChild(inf);
+
+  // ---- LIGHTING TAB ----
+  const lt=document.getElementById('tab-light');
+  const als=sec('🌟 環境光');
+  als.appendChild(cr('明るさR','range',{min:0,max:1,step:0.01,value:state.ambR},v=>state.ambR=v).el);
+  als.appendChild(cr('明るさG','range',{min:0,max:1,step:0.01,value:state.ambG},v=>state.ambG=v).el);
+  als.appendChild(cr('明るさB','range',{min:0,max:1,step:0.01,value:state.ambB},v=>state.ambB=v).el);
+  lt.appendChild(als);
+
+  const l1s=sec('💡 メインライト');
+  l1s.appendChild(cr('X','range',{min:-5,max:5,step:0.1,value:state.l1x},v=>state.l1x=v).el);
+  l1s.appendChild(cr('Y','range',{min:0,max:3,step:0.1,value:state.l1y},v=>state.l1y=v).el);
+  l1s.appendChild(cr('Z','range',{min:-5,max:5,step:0.1,value:state.l1z},v=>state.l1z=v).el);
+  l1s.appendChild(cr('強度','range',{min:0,max:2,step:0.05,value:state.l1i},v=>state.l1i=v).el);
+  l1s.appendChild(colorCR('色',[state.l1r,state.l1g,state.l1b],v=>{state.l1r=v[0];state.l1g=v[1];state.l1b=v[2];}));
+  lt.appendChild(l1s);
+
+  const l2s=sec('🔵 サブライト(TVグロー)');
+  l2s.appendChild(cr('X','range',{min:-5,max:5,step:0.1,value:state.l2x},v=>state.l2x=v).el);
+  l2s.appendChild(cr('Y','range',{min:0,max:3,step:0.1,value:state.l2y},v=>state.l2y=v).el);
+  l2s.appendChild(cr('Z','range',{min:-5,max:5,step:0.1,value:state.l2z},v=>state.l2z=v).el);
+  l2s.appendChild(cr('強度','range',{min:0,max:2,step:0.05,value:state.l2i},v=>state.l2i=v).el);
+  l2s.appendChild(colorCR('色',[state.l2r,state.l2g,state.l2b],v=>{state.l2r=v[0];state.l2g=v[1];state.l2b=v[2];}));
+  lt.appendChild(l2s);
+
+  const cams=sec('📷 カメラプリセット');
+  const presets=[
+    {label:'正面',t:0,p:0.3,d:8},
+    {label:'斜め上',t:-0.5,p:0.7,d:9},
+    {label:'真上',t:0,p:1.4,d:7},
+    {label:'キャラ目線',t:0,p:0.15,d:3},
+    {label:'デスク前',t:0.2,p:0.25,d:4},
+    {label:'全体',t:-0.6,p:0.55,d:12},
+  ];
+  presets.forEach(pr=>{
+    const btn=document.createElement('button');
+    btn.textContent=pr.label;
+    btn.style.cssText='margin:2px;padding:4px 8px;background:#1a1a35;color:#adf;border:1px solid #335;border-radius:3px;cursor:pointer;font-size:10px;';
+    btn.onclick=()=>{cam.theta=pr.t;cam.phi=pr.p;cam.dist=pr.d;cam.pan=[0,0,0];};
+    cams.appendChild(btn);
+  });
+  lt.appendChild(cams);
+}
+
+function updateCharUI(){
+  if(window._charXInput){
+    _charXInput.value=state.charX;_charXSpan.textContent=state.charX.toFixed(2);
+    _charZInput.value=state.charZ;_charZSpan.textContent=state.charZ.toFixed(2);
+    _charRYInput.value=state.charRY;_charRYSpan.textContent=state.charRY.toFixed(2);
+  }
+}
+
+buildUI();
+render();
+</script>
+</body>
+</html>
